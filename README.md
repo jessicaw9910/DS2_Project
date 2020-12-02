@@ -4,9 +4,9 @@
 
 **Data:** There are two data files "baseline.csv" and "labs and vitals.csv".
 
-+ The baseline.csv file contains patient level information (one row per patient) on baseline clinical measures that were determined at the time of admission to the hospital. The measures include demographic variables, relevant clinical history and certain diagnostic tests.
-+ The labs and vitals file contain data on vitals signs of patients (e.g. blood pressure, heart rate, SpO2 or blood oxygen levels, etc). The vital signs are measured multiple times for each patient during the course of hospitalization. There number of times it is measured per individual also varies with each individual. The vitals data is in a long format i.e. there are multiple rows for a patient.
-+ A variable dictionary is also available to explain the variables.
++ The `baseline.csv` file contains patient level information (one row per patient) on baseline clinical measures that were determined at the time of admission to the hospital. The measures include demographic variables, relevant clinical history and certain diagnostic tests.
++ The `labs` and `vitals` file contain data on vitals signs of patients (e.g. blood pressure, heart rate, SpO2 or blood oxygen levels, etc). The vital signs are measured multiple times for each patient during the course of hospitalization. There number of times it is measured per individual also varies with each individual. The vitals data is in a long format i.e. there are multiple rows for a patient.
++ A `variable dictionary` is also available to explain the variables.
 
 **Goal:**
 
