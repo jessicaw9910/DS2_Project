@@ -1,0 +1,1303 @@
+---
+title: "Final Project"
+author: "Jess White"
+date: "8/3/2020"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      message=FALSE, 
+                      warning=FALSE,
+                      fig.align = "center",
+                      fig.width = 8)
+```
+
+```{r library}
+library(janitor)
+library(magrittr)
+library(reshape)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(kableExtra)
+library(imputeTS)
+#library(randomForest)
+library(caTools)
+library(caret)
+library(gbm)
+library(pROC) 
+library(scales)
+library(e1071)
+library(glmnet)
+#library(glinternet)
+library(plotly)
+library(neuralnet)
+
+seed <- 123
+```
+
+# EDA and feature engineering
+
+## Baselines
+
+In assessing the categorical features, it appears that having diabetes and being a smoker are associated with an increased risk of intubation or death.  The use of immunosuppressants also seems to be associated with increased risk but very few patients appear to be taking an immunosuppressant.  The continuous outcomes also seem to have different distributions.  The ages of the patients who experience an event is much lower than that of patients who do not experience an event.  Similarly, the duration of symptoms is much longer on average for a patient without an event.  Finally, the BMIs are on average higher for the patients without an event.  
+
+```{r load}
+df_bl <- read.csv("C:/Users/jessb/OneDrive/MS-CB/Data science II/Project/baselines.csv",
+                  header = TRUE, sep = ",", stringsAsFactors = TRUE)
+#head(df_bl)
+
+## clean names
+colnames(df_bl)[which(colnames(df_bl) == "sex.factor")] <- "sex"
+colnames(df_bl)[which(colnames(df_bl) == "hypoxia_ed.factor")] <- "hypoxia"
+colnames(df_bl)[which(colnames(df_bl) == "dm.factor")] <- "diabetes"
+colnames(df_bl)[which(colnames(df_bl) == "htn.factor")] <- "hypertension"
+colnames(df_bl)[which(colnames(df_bl) == "pulm___1.factor")] <- "copd"
+colnames(df_bl)[which(colnames(df_bl) == "renal___1.factor")] <- "ckd"
+colnames(df_bl)[which(colnames(df_bl) == "renal___2.factor")] <- "esrd"
+colnames(df_bl)[which(colnames(df_bl) == "cad.factor")] <- "cad"
+colnames(df_bl)[which(colnames(df_bl) == "symptoms___1.factor")] <- "fever"
+colnames(df_bl)[which(colnames(df_bl) == "symptoms___2.factor")] <- "cough"
+colnames(df_bl)[which(colnames(df_bl) == "symptoms___10.factor")] <- "diarrhea"
+colnames(df_bl)[which(colnames(df_bl) == "symptoms___9.factor")] <- "nausea_vomit"
+colnames(df_bl)[which(colnames(df_bl) == "symptoms___8.factor")] <- "myalgias"
+colnames(df_bl)[which(colnames(df_bl) == "symptoms___3.factor")] <- "dyspnea"
+colnames(df_bl)[which(colnames(df_bl) == "first_cxr_results___0.factor")] <- 
+  "xray_clear"
+colnames(df_bl)[which(colnames(df_bl) == "first_cxr_results___1.factor")] <- 
+  "xray_unilateral_infiltrate"
+colnames(df_bl)[which(colnames(df_bl) == "first_cxr_results___2.factor")] <- 
+  "xray_bilateral_infiltrates"
+colnames(df_bl)[which(colnames(df_bl) == "first_cxr_results___3.factor")] <- 
+  "xray_pleural_effusion"
+df_bl <- clean_names(df_bl)
+
+## find columns that need to be releveled so reference is "Unchecked"
+idx_check <- which(colnames(df_bl) %in% 
+                     names(unlist(apply(df_bl[1, ], 2,function(x) grep("heck",x)))))
+
+#apply(df_bl[, idx_check], 2, function(x) unique(x))
+
+for (n in idx_check){
+  df_bl[, n] <- relevel(df_bl[, n], "Unchecked")
+}
+
+## find columns with "Yes/No" responses
+idx_cont <- which(sapply(df_bl, function(x) is.numeric(x)) == TRUE)
+remove <- c(idx_check, idx_cont)
+idx_yn <- seq(length(df_bl))
+idx_yn <- idx_yn[! idx_yn %in% remove]
+idx_yn <- idx_yn[-1]
+
+#str(df_bl)
+
+## table colsum for NA; use one or the other
+#data.frame(count_na = apply(df_bl, 2, function(x) sum(is.na(x))))
+#data.frame(colSums(is.na(df_bl)))
+
+## creates list of counts of all categorical variables 
+#select(df_bl, -c(mrn, age, bmi, duration_symptoms)) %>% 
+#  apply(., 2, function(x) data.frame(table(x)))
+
+## create list of all categorical variables by event
+ct_outcome <- select(df_bl, -c(mrn, age, bmi, duration_symptoms)) %>%
+  apply(., 2, function(x) data.frame(table(df_bl$event, x)))
+
+for (n in 1:length(ct_outcome)){
+  names(ct_outcome[[n]])[2] <- names(ct_outcome[n])
+}
+
+for (n in 1:length(ct_outcome)){
+  names(ct_outcome[[n]])[1] <- "Event"
+}
+
+## create bar charts for all categorical variables by event
+#lapply(ct_outcome, function(y) ggplot(y, aes(fill=Var1, y=Freq, 
+#                                             x=get(names(y)[2]))) + 
+#         geom_bar(position="dodge", stat="identity") + 
+#         xlab(names(y)[2]))
+
+ggplot(ct_outcome[[1]], aes(fill=Event, y=Freq, x=get(names(ct_outcome[[1]])[2]))) + 
+  geom_bar(position="dodge", stat="identity") + 
+  xlab(names(ct_outcome[[1]])[2])
+
+## Plot Checked/Unchecked variables
+df_ct_yn <- apply(df_bl[, idx_yn], 2, 
+                  function(x) table(df_bl[, length(df_bl)], x))
+df_ct_yn <- melt(df_ct_yn)
+colnames(df_ct_yn) <- c("Event", "Variable", "Freq")
+df_ct_yn$Event <- rep(c("No", "Yes"))
+df_ct_yn$Value <- rep(c(rep("No", 2), rep("Yes", 2)))
+
+ggplot(df_ct_yn, aes(x = Value, y = Freq, fill = Event)) +
+  geom_bar(position="dodge", stat="identity") +
+  facet_wrap(~Variable)
+
+## plot Y/N variables
+df_ct_check <- apply(df_bl[, idx_check], 2, 
+                     function(x) table(df_bl[, length(df_bl)], x))
+df_ct_check <- melt(df_ct_check)
+colnames(df_ct_check) <- c("Event", "Variable", "Freq")
+df_ct_check$Event <- rep(c("No", "Yes"))
+df_ct_check$Value <- rep(c(rep("Checked", 2), rep("Unchecked", 2)))
+
+ggplot(df_ct_check, aes(x = Value, y = Freq, fill = Event)) +
+  geom_bar(position="dodge", stat="identity") +
+  facet_wrap(~Variable)
+
+
+## remove row where patient age < 0
+#df_bl$mrn[which(df_bl$age < 0)]
+df_bl <- df_bl[-which(df_bl$age < 0),]
+
+## table of summary of continuous variables
+#df_bl[, c(idx_cont, length(df_bl))] %>%
+cat("Continuous varaibles for patients with event:")
+df_bl %>%
+  dplyr::filter(event == "Yes") %>%
+  dplyr::select(c(age, bmi, duration_symptoms)) %>%
+  apply(., 2, function(x) summary(x)) %>%
+  knitr::kable() %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+cat("Continuous varaibles for patients without event:")
+df_bl %>%
+  dplyr::filter(event == "No") %>%
+  dplyr::select(c(age, bmi, duration_symptoms)) %>%
+  apply(., 2, function(x) summary(x)) %>%
+  knitr::kable() %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+## create histograms for quantitative variables
+df_bl[, c(idx_cont, length(df_bl))] %>%
+  #  select(c(mrn, age, bmi, duration_symptoms, event)) %>%
+  melt(., id = c("mrn", "event")) %>%
+  ggplot(aes(value, group = event, fill = event)) +
+  geom_histogram(bins = 10, alpha = 0.4) +
+  facet_wrap(~variable, scales = "free")
+```
+
+## Lab data
+
+To clean the data, I calculated the timepoint in hours relative to the initial reading for all labs and for all subjects.  I also linearly imputed the missing data using the `imputeTS` package.  Originally, I intended to use the ARIMA imputation method given the autoregressive nature of the data, but this resulted in physiologically impossible imputed values given the nature of the repeated `NA` values.  
+
+To engineer the features, first, I selected summary statistics of the lab values to add to the features, including mean, median, minimum, and maximum values.  Initially, I'd intended to incorporate some trend features.  However, the measures demonstrated autoregressive properties, appearing to be cyclical over the course of the day but more or less stationary.  I also added measures of the distribution characterstics, including skew and kurtosis for each variable.    
+
+Finally, I compared the lab values that were provided to published literature to see if any are recongized as strong predictors of intubation in COVID-19 patients.  One publication cited oxygen saturation (SpO2) < 90% and respiratory rate >24 breaths/min as key features of the presentation of patients who required intubation.^[Hur, K., et al. Factors Associated With Intubation and Prolonged Intubation in Hospitalized Patients With COVID-19. Otolaryngol Head Neck Surg **163**, 170-178 (2020).]  The WHO guidelines classify severe pneumonia in COVID-19 patients as  SpO2 <93%,  respiratory rate >30 breaths/min, or severe respiratory distress.^[Clinical management of severe acute respiratory infection (SARI) when COVID-19 disease is suspected. (World Health Organization, 2020).]  As such,  I created features that represented percentage of readings where the respiratory rate was greater than 24, 25, 28, 30, 32, and 34 breaths/min and oxygen saturation was less than 85%, 87%, and 90%.  
+
+```{r lab_load, eval=FALSE}
+df_labs <- read.csv("C:/Users/jessb/OneDrive/MS-CB/Data science II/Project/lab and vitals.csv",
+                    header = TRUE, sep = ",", stringsAsFactors = FALSE)
+head(df_labs)
+str(df_labs)
+
+dim(df_labs)
+length(unique(df_labs$subject))
+
+## remove subjects that are not present in the baseline data
+idx_missing <- unique(df_labs$subject)[! unique(df_labs$subject) %in% df_bl$mrn]
+idx_missing <- which(df_labs$subject %in% idx_missing)
+#sum(df_labs$subject == 86351608)
+df_labs <- df_labs[-idx_missing, ]
+
+df_labs$date <- as.Date(gsub("T.*$", "", df_labs$time_stamp))
+temp <- regmatches(df_labs$time_stamp,regexec("T\\s*(.*?)\\s*Z",df_labs$time_stamp))
+temp <- sapply(temp, function(x) x[2])
+#sapply(temp, function(x) nchar(x)) %>% unique()
+df_labs$time <- temp
+df_labs$date_time <- strptime(paste(df_labs$date, df_labs$time), "%Y-%m-%d %H:%M:%S")
+#df_labs <- df_labs[-which(is.na(df_labs$value)), ]
+
+n_subjects <- length(unique(df_labs$subject))
+n_test <- length(unique(df_labs$name))
+
+## check to make sure once rows are dropped there
+## are still entries for each  
+#mx_counts <- matrix(nrow = n_subjects, ncol = n_test) 
+#for (n in 1:n_test){
+#  for (m in 1:n_subjects){
+#    mx_counts[m, n] <- dim(df_labs %>% 
+#                             filter(., subject == unique(df_labs$subject)[m], 
+#                                    name == unique(df_labs$name)[n]))[1]
+#  }
+#}
+#apply(mx_counts, 2, function(x) summary(x))
+#colSums(mx_counts) %>% sum()
+
+vx_diff <- rep(NA, dim(df_labs)[1])
+idx_start <- which(c(FALSE, tail(df_labs$subject,-1) != head(df_labs$subject,-1)))
+vx_diff[c(1, idx_start)] <- 0
+for (n in 1:length(vx_diff)){
+  vx_diff[n] <- ifelse(is.na(vx_diff[n]), 
+                       difftime(df_labs$date_time[n], 
+                                df_labs$date_time[n-1]), 0) %>% 
+    as.numeric()
+}
+
+#difftime(df_labs$date_time[length(vx_diff)], df_labs$date_time[length(vx_diff)-1])
+#df_labs %>% select(subject, name, date_time) %>% tail()
+#vx_diff[1:200]
+#tail(vx_diff)
+summary(vx_diff)
+
+for (n in 1:length(vx_diff)){
+  vx_diff[n] <- ifelse(vx_diff[n] == 0, 0, vx_diff[n-1] + vx_diff[n])
+}
+
+df_labs <- df_labs %>% select(., -c(date, time))
+df_labs$time <- vx_diff
+
+df_labs <- merge(df_labs, df_bl %>% select(c(mrn, event)),
+                 by.x = "subject", by.y = "mrn", all.x = TRUE)
+dim(df_labs)
+
+df_labs$name[which(df_labs$name == "s_bp_noninvasive (d)")] <- "diastolic"
+df_labs$name[which(df_labs$name == "vs_bp_noninvasive (s)")] <- "systolic"
+df_labs$name[which(df_labs$name == "vs_hr_hr")] <- "heart_rate"
+df_labs$name[which(df_labs$name == "xp_resp_rate_pt")] <- "resp_rate"
+df_labs$name[which(df_labs$name == "xp_resp_spo2")] <- "spo2"
+
+df_labs <- df_labs[order(df_labs$time), ]
+df_labs <- df_labs[order(df_labs$subject), ]
+
+## imputation of missing data linearly, per subject and lab
+## originally used ARIMA state space model but inconsistent results
+## also tried Kalman filter but din't work well (na_kalman)
+for (n in 1:length(unique(df_labs$subject))){
+  for (m in 1:length(unique(df_labs$name))){
+    subj <- unique(df_labs$subject)[n]
+    lab <- unique(df_labs$name)[m]
+    temp <- df_labs[intersect(which(df_labs$subject == subj), 
+                              which(df_labs$name == lab)), ]
+    impute <- na_interpolation(temp$value)
+    df_labs[intersect(which(df_labs$subject == subj), 
+                      which(df_labs$name == lab)), c("value")] <- impute
+  }
+}
+
+df_labs$value %>% 
+  is.na() %>% 
+  sum()
+
+save(df_labs, file = "C:/Users/jessb/OneDrive/MS-CB/Data science II/Project/labs.Rda")
+```
+
+```{r combo, eval = FALSE}
+load(file = "C:/Users/jessb/OneDrive/MS-CB/Data science II/Project/labs.Rda")
+
+df_min_subject <- aggregate(df_labs$value, 
+                            list(df_labs$subject, df_labs$name), min)
+df_mean_subject <- aggregate(df_labs$value, 
+                             list(df_labs$subject, df_labs$name), mean)
+df_median_subject <- aggregate(df_labs$value, 
+                               list(df_labs$subject, df_labs$name), median)
+df_max_subject <- aggregate(df_labs$value, 
+                            list(df_labs$subject, df_labs$name), max)
+
+df_min_subject <- spread(df_min_subject, Group.2, x)
+df_mean_subject <- spread(df_mean_subject, Group.2, x)
+df_median_subject <- spread(df_median_subject, Group.2, x)
+df_max_subject <- spread(df_max_subject, Group.2, x)
+
+colnames(df_min_subject)[1] <- "subject"
+colnames(df_min_subject)[-1] <- paste(colnames(df_min_subject)[-1], 
+                                      "min", sep = ".")
+colnames(df_mean_subject)[1] <- "subject"
+colnames(df_mean_subject)[-1] <- paste(colnames(df_mean_subject)[-1], 
+                                       "mean", sep = ".")
+colnames(df_median_subject)[1] <- "subject"
+colnames(df_median_subject)[-1] <- paste(colnames(df_median_subject)[-1], 
+                                         "median", sep = ".")
+colnames(df_max_subject)[1] <- "subject"
+colnames(df_max_subject)[-1] <- paste(colnames(df_max_subject)[-1], 
+                                      "max", sep = ".")
+
+df_combo <- merge(df_bl, df_min_subject, 
+                  by.x = "mrn", by.y = "subject", 
+                  all.x = TRUE, all.y = TRUE)
+df_combo <- merge(df_combo, df_mean_subject, 
+                  by.x = "mrn", by.y = "subject", 
+                  all.x = TRUE, all.y = TRUE)
+df_combo <- merge(df_combo, df_median_subject, 
+                  by.x = "mrn", by.y = "subject", 
+                  all.x = TRUE, all.y = TRUE)
+df_combo <- merge(df_combo, df_max_subject, 
+                  by.x = "mrn", by.y = "subject", 
+                  all.x = TRUE, all.y = TRUE)
+
+## percentage of readings with SpO2 < 85%, 87%, 90%, 93%
+df_spo2 <- data.frame(subject = unique(df_labs$subject),
+                      spo2_85 = NA,
+                      spo2_87 = NA,
+                      spo2_90 = NA,
+                      spo2_93 = NA)
+for (n in 1:dim(df_spo2)[1]){
+  subj <- df_spo2$subject[n]
+  temp <- df_labs[intersect(which(df_labs$subject == subj), 
+                            which(df_labs$name == "spo2")), c("value")]
+  df_spo2$spo2_85[n] <- sum(temp < 85)/length(temp)
+  df_spo2$spo2_87[n] <- sum(temp < 87)/length(temp)
+  df_spo2$spo2_90[n] <- sum(temp < 90)/length(temp)
+  df_spo2$spo2_93[n] <- sum(temp < 93)/length(temp)
+}
+df_combo <- merge(df_combo, df_spo2, 
+                  by.x = "mrn", by.y = "subject", 
+                  all.x = TRUE, all.y = TRUE)
+
+## percentage of readings with respiratory rate > n
+df_resp <- data.frame(subject = unique(df_labs$subject),
+                      resp_24 = NA,
+                      resp_26 = NA,
+                      resp_28 = NA,
+                      resp_30 = NA,
+                      resp_32 = NA,
+                      resp_34 = NA)
+for (n in 1:dim(df_resp)[1]){
+  subj <- df_resp$subject[n]
+  temp <- df_labs[intersect(which(df_labs$subject == subj), 
+                            which(df_labs$name == "resp_rate")), c("value")]
+  df_resp$resp_24[n] <- sum(temp > 24)/length(temp)
+  df_resp$resp_26[n] <- sum(temp > 26)/length(temp)
+  df_resp$resp_28[n] <- sum(temp > 28)/length(temp)
+  df_resp$resp_30[n] <- sum(temp > 30)/length(temp)
+  df_resp$resp_32[n] <- sum(temp > 32)/length(temp)
+  df_resp$resp_34[n] <- sum(temp > 34)/length(temp)
+}
+df_combo <- merge(df_combo, df_resp, 
+                  by.x = "mrn", by.y = "subject", 
+                  all.x = TRUE, all.y = TRUE)
+
+## measures of skew and kurtosis
+df_skew <- data.frame(subject = unique(df_labs$subject),
+                      V1 = NA,
+                      V2 = NA,
+                      V3 = NA,
+                      V4 = NA,
+                      V5 = NA,
+                      V6 = NA,
+                      V7 = NA,
+                      V8 = NA,
+                      V9 = NA,
+                      V10 = NA)
+colnames(df_skew)[-1] <- c(paste(unique(df_labs$name), "skew", sep = "."),
+                           paste(unique(df_labs$name), "kurtosis", sep = "."))
+
+for (n in 1:length(unique(df_labs$subject))){
+  for (m in 1:length(unique(df_labs$name))){
+    subj <- unique(df_labs$subject)[n]
+    lab <- unique(df_labs$name)[m]
+    temp <- df_labs[intersect(which(df_labs$subject == subj), 
+                              which(df_labs$name == lab)), c("value")]
+    
+    skew <- skewness(temp)
+    df_skew[n, m + 1] <- skew
+    
+    kurt <- kurtosis(temp)
+    df_skew[n, m + 6] <- kurt
+  }
+}
+df_combo <- merge(df_combo, df_skew, 
+                  by.x = "mrn", by.y = "subject", 
+                  all.x = TRUE, all.y = TRUE)
+
+## add integer event to combo df
+df_combo$event.int <- ifelse(df_combo$event == "Yes", 1, 0)
+
+save(df_combo, file = "C:/Users/jessb/OneDrive/MS-CB/Data science II/Project/combo.Rda")
+```
+
+```{r stats}
+load(file = "C:/Users/jessb/OneDrive/MS-CB/Data science II/Project/labs.Rda")
+load(file = "C:/Users/jessb/OneDrive/MS-CB/Data science II/Project/combo.Rda")
+
+## changes in labs over time by outcome
+ggplot(df_labs, aes(x = time, 
+                    y = value,
+                    color = event)) +
+  geom_line() +
+  facet_wrap(name~event, scale = "free") +
+  xlab("Relative timepoint, hours")
+
+## too large to run with subject as group
+#ggplot(df_labs, aes(x = time, 
+#                    y = value,
+#                    group = subject,
+#                    color = as.factor(subject))) +
+#  geom_line() +
+#  facet_wrap(event~name)
+
+## aggregate summary for lab values
+df_agg_min <- aggregate(df_labs$value, list(df_labs$event, df_labs$name), min)
+colnames(df_agg_min) <- c("Event", "Lab Measure", "Minimum")
+df_agg_mean <- aggregate(df_labs$value, list(df_labs$event, df_labs$name), mean)
+colnames(df_agg_mean) <- c("Event", "Lab Measure", "Mean")
+df_agg_median <- aggregate(df_labs$value, list(df_labs$event, df_labs$name), median)
+colnames(df_agg_median) <- c("Event", "Lab Measure", "Median")
+df_agg_max <- aggregate(df_labs$value, list(df_labs$event, df_labs$name), max)
+colnames(df_agg_max) <- c("Event", "Lab Measure", "Maximum")
+
+df_agg <- merge(df_agg_min, df_agg_mean, by = c("Event", "Lab Measure"))
+df_agg <- merge(df_agg, df_agg_median, by = c("Event", "Lab Measure"))
+df_agg <- merge(df_agg, df_agg_max, by = c("Event", "Lab Measure"))
+df_agg <- df_agg[order(df_agg$`Lab Measure`), ]
+knitr::kable(df_agg) %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+## longitudinal lab summary statistics
+df_long <- df_combo %>% 
+  dplyr::select(colnames(df_combo)[c(1, 27:47)])
+df_long <- melt(df_long, id.vars = c("mrn", "event"))
+df_long$variable <- as.character(df_long$variable)
+var_split <- sapply(df_long$variable, function(x) strsplit(x, ".", fixed = TRUE))
+df_long$var <- unlist(lapply(var_split, `[[`, 1))
+df_long$sum <- unlist(lapply(var_split, `[[`, 2))
+
+ggplot(df_long, aes(x = value, fill = as.factor(event), group = event)) +
+  geom_histogram(bins = 20, alpha = 0.4) +
+  facet_grid(sum~var, scales = "free")
+
+## SpO2 plot
+df_spo2_long <- df_combo %>%
+  dplyr::select(c(mrn, spo2_85, spo2_87, spo2_90, spo2_93, event))
+
+df_spo2_long <- melt(df_spo2_long, id.vars = c("mrn", "event"))
+
+ggplot(df_spo2_long, aes(x = value, fill = event)) +
+  geom_histogram(bins = 15, alpha = 0.4) +
+  facet_wrap(~variable, scales = "free")
+
+## respiratory rate plot
+df_resp_long <- df_combo %>%
+  dplyr::select(c(mrn, resp_24, resp_26, resp_28, 
+           resp_30, resp_32, resp_34, event))
+
+df_resp_long <- melt(df_resp_long, id.vars = c("mrn", "event"))
+
+ggplot(df_resp_long, aes(x = value, fill = event)) +
+  geom_histogram(bins = 15, alpha = 0.4) +
+  facet_wrap(~variable, scales = "free")
+
+set.seed(seed)
+sample <- sample.split(df_combo, SplitRatio = 0.75)
+train <- subset(df_combo, sample == TRUE) 
+test <- subset(df_combo, sample == FALSE) 
+```
+
+# Tree-based methods
+
+Given the number and diversity of types of features, I first tried tree-based methods optimized for performance with gradient boosting and AdaBoost.  This is because tree-based models can partition the feature space in a non-parametric manner.  Gradient boosting and AdaBoost take an otherwise weak learner of a decision tree and improve performance by learning from previous trees in a manner that reduces error.  Additionally, these while these are both "black box" methods, they can provide relative feature importance, which allows them to be useful both for inference and prediction.  
+
+For both methods, I first selected the tuning parameters of interaction depth, number of trees, and shrinkage using GridSearch and 5-fold cross-validation.  Then I fit the model on the training data, and assessed performance predominantly on the testing error (i.e., generalization error).  
+
+## Gradient boosted 
+
+```{r gbm}
+set.seed(seed)
+
+## GridSearch grid
+caretGrid.gbm <- expand.grid(interaction.depth = c(1, 2), 
+                             n.trees = seq(1000, 5000, by = 1000), 
+                             shrinkage = seq(0, 0.01, by = 0.001), 
+                             n.minobsinnode = 10)
+
+## fit model using grid search
+k <- 5
+gbm.train <- caret::train(event ~ . - event - event.int - mrn,data = train, 
+                          distribution = "bernoulli", method = "gbm", 
+                          trControl = trainControl(method="cv", number=k),
+                          verbose = FALSE, tuneGrid = caretGrid.gbm)
+
+cat("The optimal shrinkage parameter is", gbm.train$bestTune$shrinkage,
+    "out of the range of", min(caretGrid.gbm$shrinkage), "-",
+    max(caretGrid.gbm$shrinkage), "tested.\n")
+
+cat("The optimal number of trees is", gbm.train$bestTune$n.trees,
+    "out of the range of", min(caretGrid.gbm$n.trees), "-",
+    max(caretGrid.gbm$n.trees), "tested.\n")
+
+cat("The optimal interaction depth is", gbm.train$bestTune$interaction.depth,
+    "out of the range of", min(caretGrid.gbm$interaction.depth), "-",
+    max(caretGrid.gbm$interaction.depth), "tested.")
+
+gbm.fit <- gbm(event.int ~ . - event - event.int - mrn, data = train, 
+               n.trees = gbm.train$bestTune$n.trees, 
+               interaction.depth = gbm.train$bestTune$interaction.depth, 
+               shrinkage = gbm.train$bestTune$shrinkage,  
+               distribution = 'bernoulli')
+
+## selected arbitrarily as in the tree-based homework
+## to compare different methods testing results
+n_tree <- 500
+
+## training errors
+predict.train.gbm <- predict(gbm.fit,
+                             newdata = train,
+                             n.trees = n_tree,
+                             type = "response")  
+predict.train.gbm <- ifelse(predict.train.gbm > 0.5, 1, 0)
+
+#confusionMatrix(as.factor(train$event.int), as.factor(predict.train.gbm))
+acc.train.gbm <- 1-mean(predict.train.gbm != train$event.int)
+
+probs.train.gbm <- predict(gbm.train,
+                           newdata = train,
+                           n.trees = n_trees,
+                           type = "prob")
+roc.train.gbm <- roc(train$event, probs.train.gbm$Yes)
+
+## test errors
+predict.test.gbm <- predict(gbm.fit,
+                            newdata = test,
+                            n.trees = n_tree,
+                            type = "response")  
+predict.test.gbm <- ifelse(predict.test.gbm > 0.5, 1, 0)
+
+confusionMatrix(as.factor(test$event.int), as.factor(predict.test.gbm))
+acc.test.gbm <- 1-mean(predict.test.gbm != test$event.int)
+
+probs.test.gbm <- predict(gbm.train,
+                          newdata = test,
+                          n.trees = n_trees,
+                          type = "prob")
+roc.test.gbm <- roc(test$event, probs.test.gbm$Yes)
+#auc.test.gbm <- gbm.roc.area(test$event.int, predict.test.gbm)
+```
+
+## AdaBoost
+
+```{r adaboost}
+set.seed(seed)
+
+## fit model using grid search
+ada.train <- caret::train(event ~ . - event - event.int - mrn,data = train, 
+                          distribution = "adaboost", method = "gbm", 
+                          trControl = trainControl(method="cv", number=k),
+                          verbose = FALSE, tuneGrid = caretGrid.gbm)
+
+cat("The optimal shrinkage parameter is", ada.train$bestTune$shrinkage,
+    "out of the range of", min(caretGrid.gbm$shrinkage), "-",
+    max(caretGrid.gbm$shrinkage), "tested.\n")
+
+cat("The optimal number of trees is", ada.train$bestTune$n.trees,
+    "out of the range of", min(caretGrid.gbm$n.trees), "-",
+    max(caretGrid.gbm$n.trees), "tested.\n")
+
+cat("The optimal interaction depth is", ada.train$bestTune$interaction.depth,
+    "out of the range of", min(caretGrid.gbm$interaction.depth), "-",
+    max(caretGrid.gbm$interaction.depth), "tested.")
+
+ada.fit <- gbm(event.int ~ . - event - event.int - mrn, data = train, 
+               n.trees = ada.train$bestTune$n.trees, 
+               interaction.depth = ada.train$bestTune$interaction.depth, 
+               shrinkage = ada.train$bestTune$shrinkage,  
+               distribution = 'adaboost')
+
+## training error
+predict.train.ada <- predict(ada.fit,
+                             newdata = train,
+                             n.trees = n_tree,
+                             type = "response")  
+predict.train.ada <- ifelse(predict.train.ada > 0.5, 1, 0)
+
+#confusionMatrix(as.factor(train$event.int), as.factor(predict.train.ada))
+acc.train.ada <- 1-mean(predict.train.ada != train$event.int)
+
+probs.train.ada <- predict(ada.train,
+                           newdata = train,
+                           n.trees = n_trees,
+                           type = "prob")
+
+roc.train.ada <- roc(train$event, probs.train.ada$Yes)
+
+## test error
+predict.test.ada <- predict(ada.fit,
+                            newdata = test,
+                            n.trees = n_tree,
+                            type = "response")  
+predict.test.ada <- ifelse(predict.test.ada > 0.5, 1, 0)
+
+confusionMatrix(as.factor(test$event.int), as.factor(predict.test.ada))
+acc.test.ada <- 1-mean(predict.test.ada != test$event.int)
+
+probs.test.ada <- predict(ada.train,
+                          newdata = test,
+                          n.trees = n_trees,
+                          type = "prob")
+
+roc.test.ada <- roc(test$event, probs.test.ada$Yes)
+#auc.test.ada <- gbm.roc.area(test$event.int, predict.ada)
+```
+
+## Comparison of tree-based methods
+
+Both gradient boosting and AdaBoost allow for assessment of feature importance.  Using both methodologies, the order of feature importance was roughly similar.  Overall, age and BMI were highly important, followed by various lab measures and duration of symptoms.  In general, the continuous variables had a greater influence on the outcome than the categorical features.  Of the categorical features, cancer smoking status, and diabetes ranked among the highest.  Of the features I engineered based on the literature, as suggested by the histograms, SpO2 < 90% and respiratory rate > 28 breaths per minute were the most important.  
+
+To compare which method was preferable, I assessed  the ROC curve AUC for the training and testing data.  The performance was incredible similar with ROC AUC of 0.9 for both models.  Since the training ROC AUC was also quite similar, it was challenging to assess whether one model was more "overfit" relative to the other, thus demonstrating high bias.  Therefore, I also assessed the variance of the models by looking at the standard error of the cross-validation error from the model training output.  Using this output, the AdaBoost model appeared to have less variance, and thus I would select this method as preferable.    
+
+```{r tree_comp}
+## feature importance for gradient boosting
+df_gbm <- summary(gbm.fit, plotit = FALSE)
+rownames(df_gbm) <- c()
+df_gbm$var <- as.character(df_gbm$var)
+colnames(df_gbm) <- c("Features", "Importance, GBM")
+
+## feature importance for AdaBoost
+df_ada <- summary(ada.fit, plotit = FALSE)
+rownames(df_ada) <- c()
+df_ada$var <- as.character(df_ada$var)
+colnames(df_ada) <- c("Features", "Importance, AdaBoost")
+
+df_feat_imp_tree <- merge(df_gbm, df_ada, by = "Features")
+df_feat_imp_tree <- df_feat_imp_tree[order(df_feat_imp_tree$`Importance, GBM`, 
+                                           decreasing = TRUE), ]
+knitr::kable(df_feat_imp_tree) %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+par(pty = "s")
+par(mfrow = c(1, 2))
+
+## training error plots
+plot(roc.train.gbm, 
+     plot = TRUE,
+     legacy.axes = TRUE,
+     main = "Training Error",
+     xlab = "False positive percentage",
+     ylab = "True positive percentage", 
+     col = "blue", 
+     print.auc = TRUE,
+     print.auc.y = 0.75,
+     print.auc.cex = 0.9)
+plot(roc.train.ada, 
+     plot = TRUE,
+     add = TRUE,
+     col = "red", 
+     print.auc = TRUE,
+     print.auc.y = 0.65,
+     print.auc.cex = 0.9)
+legend("bottomright", cex = 0.65, horiz = FALSE, 
+       legend = c("Gradient boost", "AdaBoost"),
+       col = c("blue", "red"), lwd = 2, bty = "n")
+
+## testing error plots
+plot(roc.test.gbm, 
+     plot = TRUE,
+     legacy.axes = TRUE,
+     main = "Testing Error",
+     xlab = "False positive percentage",
+     ylab = "True positive percentage", 
+     col = "blue", 
+     print.auc = TRUE,
+     print.auc.y = 0.75,
+     print.auc.cex = 0.9)
+plot(roc.test.ada, 
+     plot = TRUE,
+     add = TRUE,
+     col = "red", 
+     print.auc = TRUE,
+     print.auc.y = 0.65,
+     print.auc.cex = 0.9)
+legend("bottomright", cex = 0.65, horiz = FALSE, 
+       legend = c("Gradient boost", "AdaBoost"),
+       col = c("blue", "red"), lwd = 2, bty = "n")
+
+par(mfrow = c(1, 1))
+
+## cross-validation errors of testing data
+find_cv_error_tree <- function(k_fold, data, outcome, model, trees, set_seed){
+  set.seed(set_seed)
+  idx <- createFolds(data[, 1], k=k_fold)
+  errors_vx <- numeric(length = k_fold)
+  
+  for (n in 1:k_fold){
+    pred <- predict(model,
+                    newdata = data[idx[[n]], ],
+                    n.trees = trees,
+                    type = "response")
+    pred <- ifelse(pred > 0.5, 1, 0)
+    accuracy <- 1-mean(pred != outcome[idx[[n]]])
+    errors_vx[n] <- accuracy
+  }
+  
+  return(errors_vx)  
+}
+
+cv_error_test_gbm <- find_cv_error_tree(k_fold = k, 
+                                        data = test, 
+                                        outcome = test$event.int, 
+                                        model = gbm.fit,
+                                        trees = n_tree,
+                                        set_seed = seed)
+cv_error_test_ada <- find_cv_error_tree(k_fold = k, 
+                                        data = test, 
+                                        outcome = test$event.int, 
+                                        model = ada.fit,
+                                        trees = n_tree,
+                                        set_seed = seed)
+
+## standard error of cross-validation
+gbm_se <- sqrt(var(1 - gbm.train$resample$Accuracy))/sqrt(k)
+ada_se <- sqrt(var(1 - ada.train$resample$Accuracy))/sqrt(k)
+
+## formula from https://www.stat.cmu.edu/~ryantibs/datamining/lectures/18-val1.pdf
+cat("The standard error of cross-validation error with gradient boosting is", percent(gbm_se, accuracy = 0.001))
+cat("The standard error of cross-validation error with AdaBoost is", percent(ada_se, accuracy = 0.001))
+```
+
+# Support vector machine
+
+Then, I wanted to test if another methodology would potentially improve upon the performance of a tree-based model.   I selected another "black box" model: a support vector machine with a radial kernel.  Due to the radial kernel's ability to project the data into infinite dimensions, it allows the SVM to find separating hyperplanes for data that is otherwise not strictly separable.  However, interpretability is diminished with this approach.  We can, however, output relative feature importance, just as we did with the tree-based models.  
+
+To build this model, I first scaled the features and then selected the tuning parameters C and $\sigma$ using Grid-Search and 5-fold cross-validation.  Based on the cross-valdiation accuracy, the model with $\sigma$ of 0.1 suffered from overfitting and performed very poorly, consistent with expected results from higher values of this tuning parameter.  Overall, the the cross-validation accuracy was the highest for the model fit with a $\sigma$ of 0.001.  This is also apparent when comparing the ROC curves for the training and testing error, where the test performance is best $\sigma$ of 0.001 despite having the lowest training AUC.    
+
+The feature importance is roughly similar to those resulting from the tree-based methods.  Again, the continuous variables appeared to be the most important features, with age, heart rate, and BMI as the top 3 features.  Of the categorical features, diabetes, admitted to ED before lab order set change, fever, myalgias, and smoking status were the most important.  
+
+```{r svm}
+df_combo_svm <- df_combo
+idx_cont <- which(sapply(df_combo_svm, function(x) is.numeric(x)) == TRUE)
+idx_cont <- idx_cont[-c(1, length(idx_cont))]
+#str(df_combo_svm[idx_cont])
+df_combo_svm[, idx_cont] <- scale(df_combo_svm[, idx_cont])
+df_combo_svm <- df_combo_svm %>%
+  dplyr::select(-c(mrn, event.int))
+
+set.seed(seed)
+sample_svm <- sample.split(df_combo_svm, SplitRatio = 0.75)
+train_svm <- subset(df_combo_svm, sample_svm == TRUE) 
+test_svm <- subset(df_combo_svm, sample_svm == FALSE) 
+ 
+## GridSearch grid
+caretGrid.svm <- expand.grid(C = c(0.001, 0.01, 0.1, 1, 5, 10, 15),
+                             sigma = c(10^-1, 10^-2, 10^-3))
+
+set.seed(seed)
+## fit model using grid search
+svm.train <- caret::train(event ~ . - event,data = train_svm, 
+                          method = "svmRadial", 
+                          trControl = trainControl(method="cv", number=k),
+                          verbose = FALSE, tuneGrid = caretGrid.svm)
+
+plot(svm.train)
+
+df_feat_imp_svm <- varImp(svm.train, value = "gcv")
+df_feat_imp_svm <- df_feat_imp_svm$importance
+df_feat_imp_svm <- df_feat_imp_svm[order(df_feat_imp_svm$Yes, decreasing = TRUE), ]
+
+knitr::kable(df_feat_imp_svm) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+cost1 <- svm.train$results$C[which(svm.train$results$sigma == 0.001)][which.max(svm.train$results$Accuracy[which(svm.train$results$sigma == 0.001)])]
+cost2 <- svm.train$results$C[which(svm.train$results$sigma == 0.01)][which.max(svm.train$results$Accuracy[which(svm.train$results$sigma == 0.01)])]
+cost3 <- svm.train$results$C[which(svm.train$results$sigma == 0.1)][which.max(svm.train$results$Accuracy[which(svm.train$results$sigma == 0.1)])]
+
+svm.fit1 <- svm(event ~ . - event, data = train_svm,
+                kernel = "radial", gamma = 0.001, cost = cost1, probability = TRUE)
+svm.fit2 <- svm(event ~ . - event, data = train_svm,
+                kernel = "radial", gamma = 0.01, cost = cost2, probability = TRUE)
+svm.fit3 <- svm(event ~ . - event, data = train_svm,
+                kernel = "radial", gamma = 0.1, cost = cost3, probability = TRUE)
+
+## training metrics
+pred.train.svm1 <- predict(svm.fit1, train_svm, type = "response")
+pred.train.svm2 <- predict(svm.fit2, train_svm, type = "response")
+pred.train.svm3 <- predict(svm.fit3, train_svm, type = "response")
+
+acc.train.svm1 <- 1 - mean(train_svm$event != pred.train.svm1)
+acc.train.svm2 <- 1 - mean(train_svm$event != pred.train.svm2)
+acc.train.svm3 <- 1 - mean(train_svm$event != pred.train.svm3)
+
+prob.train.svm1 <- predict(svm.fit1, train_svm, probability = TRUE)
+prob.train.svm2 <- predict(svm.fit2, train_svm, probability = TRUE)
+prob.train.svm3 <- predict(svm.fit3, train_svm, probability = TRUE)
+
+roc.train.svm1 <- roc(train_svm$event, attr(prob.train.svm1, "probabilities")[, 1])
+roc.train.svm2 <- roc(train_svm$event, attr(prob.train.svm2, "probabilities")[, 1])
+roc.train.svm3 <- roc(train_svm$event, attr(prob.train.svm3, "probabilities")[, 1])
+
+## test metrics
+pred.test.svm1 <- predict(svm.fit1, test_svm, type = "response")
+pred.test.svm2 <- predict(svm.fit2, test_svm, type = "response")
+pred.test.svm3 <- predict(svm.fit3, test_svm, type = "response")
+
+acc.test.svm1 <- 1 - mean(test_svm$event != pred.test.svm1)
+acc.test.svm2 <- 1 - mean(test_svm$event != pred.test.svm2)
+acc.test.svm3 <- 1 - mean(test_svm$event != pred.test.svm3)
+
+prob.test.svm1 <- predict(svm.fit1, test_svm, probability = TRUE)
+prob.test.svm2 <- predict(svm.fit2, test_svm, probability = TRUE)
+prob.test.svm3 <- predict(svm.fit3, test_svm, probability = TRUE)
+
+roc.test.svm1 <- roc(test_svm$event, attr(prob.test.svm1, "probabilities")[, 1])
+roc.test.svm2 <- roc(test_svm$event, attr(prob.test.svm2, "probabilities")[, 1])
+roc.test.svm3 <- roc(test_svm$event, attr(prob.test.svm3, "probabilities")[, 1])
+
+par(pty = "s")
+par(mfrow = c(1, 2))
+
+## training error plots
+plot(roc.train.svm1, 
+     plot = TRUE,
+     legacy.axes = TRUE,
+     main = "Training Error",
+     xlab = "False positive percentage",
+     ylab = "True positive percentage", 
+     col = "blue", 
+     print.auc = TRUE,
+     print.auc.y = 0.75,
+     print.auc.cex = 0.9)
+plot(roc.train.svm2, 
+     plot = TRUE,
+     add = TRUE,
+     col = "red", 
+     print.auc = TRUE,
+     print.auc.y = 0.65,
+     print.auc.cex = 0.9)
+plot(roc.train.svm3, 
+     plot = TRUE,
+     add = TRUE,
+     col = "green", 
+     print.auc = TRUE,
+     print.auc.y = 0.55,
+     print.auc.cex = 0.9)
+legend("bottom", cex = 0.5, horiz = FALSE, 
+       legend = c("Radial SVM, gamma = 0.001",
+                  "Radial SVM, gamma = 0.01",
+                  "Radial SVM, gamma = 0.1"),
+       col = c("blue", "red", "green"), lwd = 2, bty = "n")
+
+## testing error plots
+plot(roc.test.svm1, 
+     plot = TRUE,
+     legacy.axes = TRUE,
+     main = "Testing Error",
+     xlab = "False positive percentage",
+     ylab = "True positive percentage", 
+     col = "blue", 
+     print.auc = TRUE,
+     print.auc.y = 0.75,
+     print.auc.cex = 0.9)
+plot(roc.test.svm2, 
+     plot = TRUE,
+     add = TRUE,
+     col = "red", 
+     print.auc = TRUE,
+     print.auc.y = 0.65,
+     print.auc.cex = 0.9)
+plot(roc.test.svm3, 
+     plot = TRUE,
+     add = TRUE,
+     col = "green", 
+     print.auc = TRUE,
+     print.auc.y = 0.55,
+     print.auc.cex = 0.9)
+legend("bottom", cex = 0.5, horiz = FALSE, 
+       legend = c("Radial SVM, gamma = 0.001",
+                  "Radial SVM, gamma = 0.01",
+                  "Radial SVM, gamma = 0.1"),
+       col = c("blue", "red", "green"), lwd = 2, bty = "n")
+
+par(mfrow = c(1, 1))
+
+confusionMatrix(pred.test.svm1, test_svm$event)
+
+## cross-validation errors of testing data
+find_cv_error_svm <- function(k_fold, data, outcome, model, set_seed){
+  set.seed(set_seed)
+  idx <- createFolds(data[, 1], k=k_fold)
+  errors_vx <- numeric(length = k_fold)
+  
+  for (n in 1:k_fold){
+    pred <- predict(model,
+                    data[idx[[n]], ],
+                    type = "response")
+    accuracy <- 1-mean(pred != outcome[idx[[n]]])
+    errors_vx[n] <- accuracy
+  }
+  
+  return(errors_vx)  
+}
+
+cv_error_test_svm <- find_cv_error_svm(k_fold = k, 
+                                       data = test_svm, 
+                                       outcome = test_svm$event, 
+                                       model = svm.fit1,
+                                       set_seed = seed)
+
+## standard error of cross-validation
+svm_se <- sqrt(var(1 - svm.train$resample$Accuracy))/sqrt(k)
+
+## formula from https://www.stat.cmu.edu/~ryantibs/datamining/lectures/18-val1.pdf
+cat("The standard error of cross-validation error with SVM is", percent(svm_se, accuracy = 0.001))
+```
+
+# Lasso regression
+
+Since many of the features, particularly those we engineered, are correlated to one another, this precludes us from deploying typical generalized linear models, such as logistic regression due to multicollinearity, particularly because we are concerned both with inference and prediction.  
+
+However, a regularized regression model, such as Lasso could be used to generate interpretable coefficients.  As with SVM, the first step to interpret the relative importance of the features is to scale them.  Next, I used cross-validation to determine the optimal $\lambda$ shrinakge parameter.  Then I fit the model and assessed performance using training, testing, and cross-validation error.  Additionally, I included all interaction terms in the model to attempt to understand how the features influenced one another.  
+
+While the other models have provided relative feature importance, I had not yet investigated how these features affect the outcome because the tree-based models are non-parametric and I had not evaluated the coefficients of the SVM.  Looking at the coefficients, it becomes clear that increased age, heart rate, BMI, and systolic blood pressure are associated with decreased risk of intubation and/or death.  
+
+All of the top features associated with an increased risk of intubation or death are interaction terms.  Top interaction terms associated with an increased risk of an event are having diabetes and dyspnea, having a pleural effusion on x-ray and respiratory rate above 32 breaths/min, being a smoker and having dyspnea, and being a smoker and being hypoxic.  
+
+With the other methods, there were multiple features generated from the same lab value terms (e.g., heart rate mean and median) in the top important features.  With the Lasso regression, this occured less frequently as the coefficients of repetitive features was shrunk to zero.    
+
+```{r lasso}
+x_train <- model.matrix(event ~ (.)^2, train_svm)[, -1]
+y_train <- train_svm$event
+x_test <- model.matrix(event ~ (.)^2, test_svm)[, -1]
+y_test <- test_svm$event
+
+#lasso.train <- cv.glmnet(x_train, y_train, family = "binomial", 
+#                         alpha = 1, type.measure="class", nfolds = k)
+#plot(lasso.train)
+#lambda <- min(lasso.train$cvm)
+#cat("The optimal lambda is", lambda)
+
+## set alpha to 1 for Lasso (e.g., shrink to zero)
+caretGrid.lasso <- expand.grid(lambda = c(seq(0, 1, 0.01)), alpha = 1)
+
+glm.train <- caret::train(x = x_train,
+                          y = y_train,
+                          family = "binomial",
+                          method = "glmnet",
+                          trControl = trainControl(method="cv", number=k),
+                          tuneGrid = caretGrid.lasso)
+plot(glm.train)
+best_lambda <- glm.train$bestTune$lambda
+#glm.train$resample
+
+## fit model on all training data
+lasso.fit <- glmnet(x_train, y_train, family = "binomial", 
+                    lambda = best_lambda, alpha = 1)
+
+## training accuracy
+pred.train.lasso <- predict(lasso.fit, x_train, type = "response")
+pred.train.lasso <- ifelse(pred.train.lasso > 0.5, "Yes", "No")
+acc.train.lasso <- 1 - mean(pred.train.lasso != y_train)
+
+## training ROC curve
+prob.train.lasso <- predict(lasso.fit, x_train)
+roc.train.lasso <- roc(y_train, as.numeric(prob.train.lasso))
+
+## testing accuracy
+pred.test.lasso <- predict(lasso.fit, x_test, type = "response")
+pred.test.lasso <- ifelse(pred.test.lasso > 0.5, "Yes", "No")
+acc.test.lasso <- 1 - mean(pred.test.lasso != y_test)
+
+## test ROC curve
+prob.test.lasso <- predict(lasso.fit, x_test)
+roc.test.lasso <- roc(y_test, as.numeric(prob.test.lasso))
+
+par(pty = "s")
+par(mfrow = c(1, 2))
+
+## training error plots
+plot(roc.train.lasso, 
+     plot = TRUE,
+     legacy.axes = TRUE,
+     main = "Training Error",
+     xlab = "False positive percentage",
+     ylab = "True positive percentage", 
+     col = "blue", 
+     print.auc = TRUE,
+     print.auc.y = 0.75,
+     print.auc.cex = 0.9)
+
+## testing error plots
+plot(roc.test.lasso, 
+     plot = TRUE,
+     legacy.axes = TRUE,
+     main = "Testing Error",
+     xlab = "False positive percentage",
+     ylab = "True positive percentage", 
+     col = "blue", 
+     print.auc = TRUE,
+     print.auc.y = 0.75,
+     print.auc.cex = 0.9)
+
+par(mfrow = c(1, 1))
+
+confusionMatrix(as.factor(pred.test.lasso), y_test)
+
+## standard error of cross-validation
+lasso_se <- sqrt(var(1 - glm.train$resample$Accuracy))/sqrt(k)
+
+## formula from https://www.stat.cmu.edu/~ryantibs/datamining/lectures/18-val1.pdf
+cat("The standard error of cross-validation error with a Lasso regression is", percent(lasso_se, accuracy = 0.001))
+
+## cross-validation errors of testing data
+find_cv_error_lasso <- function(k_fold, data, outcome, model, set_seed){
+  set.seed(set_seed)
+  idx <- createFolds(data[, 1], k=k_fold)
+  errors_vx <- numeric(length = k_fold)
+  
+  for (n in 1:k_fold){
+    pred <- predict(model,
+                    newx = data[idx[[n]], ],
+                    type = "response")
+    pred <- ifelse(pred > 0.5, "Yes", "No")
+    accuracy <- 1-mean(pred != outcome[idx[[n]]])
+    errors_vx[n] <- accuracy
+  }
+  return(errors_vx)
+}
+ 
+## cross-validation errors of testing data
+cv_error_test_lasso <- find_cv_error_lasso(k_fold = k, 
+                                           data = x_test, 
+                                           outcome = y_test, 
+                                           model = lasso.fit,
+                                           set_seed = seed)
+
+df_feat_imp_lasso <- as.data.frame(as.matrix(lasso.fit$beta))
+df_feat_imp_lasso$features <- rownames(df_feat_imp_lasso)
+df_feat_imp_lasso$coefficeints <- df_feat_imp_lasso$s0
+df_feat_imp_lasso <- df_feat_imp_lasso[, -1]
+rownames(df_feat_imp_lasso) <- c()
+df_feat_imp_lasso <- df_feat_imp_lasso[order(abs(df_feat_imp_lasso$coefficeints), 
+                                             decreasing = TRUE), ]
+df_feat_imp_lasso$odd_ratio <- exp(df_feat_imp_lasso$coefficeints)
+cat(sum(!abs(df_feat_imp_lasso$coefficeints) > 0), "variables out of",
+    dim(df_feat_imp_lasso)[1], "had coefficients reduced to zero.")
+cat(sum(abs(df_feat_imp_lasso$coefficeints) > 0), "variables out of",
+    dim(df_feat_imp_lasso)[1], "had coefficients greater than zero.")
+
+df_feat_imp_lasso <- df_feat_imp_lasso[-which(df_feat_imp_lasso$coefficeints == 0), ]
+knitr::kable(df_feat_imp_lasso) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+## interaction terms in Lasso
+#x_train <- train_svm %>% dplyr::select(-event)
+#y_train <- train_svm$event
+#x_test <- test_svm %>% dplyr::select(-event)
+#y_test <- test_svm$event
+
+#idx_num <- which(colnames(x_train) %in% names(idx_cont))
+#idx_cat <- which(!1:dim(x_train)[2] %in% idx_num)
+#numLevels <- numeric(dim(x_train)[2])
+#numLevels[idx_num] <- 1
+#numLevels[idx_cat] <- 2
+
+#which(apply(x_train, 2, function(x) grep("Yes", x)) > 0)
+#set.seed(123)
+#cv.glinternet <- glinternet.cv(x_train, y_train, numLevels)
+```
+
+# Comparison of models
+
+Overall, while the accuracy was higher for the SVM model, the ROC AUC was higher for the tree-based methods.  Additionally, the standard error of the cross-validation error from the model training is highest for the Lasso and SVM models, followed by  the gradient boosted model, and lowest for the AdaBoost model.  Thus, the AdaBoost model still seems to perform the best on the whole and is the model I would recommend for performance.  If inference is the goal, the Lasso regression would be the optimal model as it produces interpretable coefficients, as discussed in the Lasso section.  
+
+```{r comp}
+df_comp <- data.frame(Method = c("Gradient boosted", "AdaBoost", 
+                                 "SVM", "Lasso regression"),
+                      Accuracy = percent(c(acc.test.gbm, acc.test.ada, 
+                                           acc.test.svm1, acc.test.lasso),
+                                         accuracy = 0.1),
+                      AUC = round(c(roc.test.gbm$auc, roc.test.gbm$auc,
+                                    roc.test.svm1$auc, roc.test.lasso$auc), 
+                                  digits = 3),
+                      SE = percent(c(gbm_se, ada_se, 
+                                     svm_se, lasso_se),
+                                   accuracy = 0.01))
+df_comp <- t(df_comp)
+colnames(df_comp) <- df_comp[1, ]
+df_comp <- df_comp[-1, ]
+rownames(df_comp)[3] <- "SE, CV Training Error" 
+
+knitr::kable(df_comp) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+df_cv <- data.frame(gbm_train = gbm.train$resample$Accuracy, 
+                    ada_train = ada.train$resample$Accuracy,
+                    gbm_test = cv_error_test_gbm,
+                    ada_test = cv_error_test_ada,
+                    svm_train = svm.train$resample$Accuracy,
+                    svm_test = cv_error_test_svm,
+                    lasso_train = glm.train$resample$Accuracy,
+                    lasso_test = cv_error_test_lasso)
+df_cv <- gather(df_cv)
+colnames(df_cv) <- c("condition", "accuracy")
+df_cv$method <- gsub("_.*$", "", df_cv$condition)
+df_cv$data <- gsub("^.*_", "", df_cv$condition)
+
+ggplot(df_cv, aes(x = as.factor(data), y = accuracy, col = data)) +
+  geom_boxplot() +
+  geom_jitter(alpha = 0.4) + 
+  ylab("Validation accuracy for 5-fold cross-validation") +
+  facet_grid(~method) +
+  theme(axis.title.x = element_blank())
+```
+
+# Appendix
+
+In addition to the analyses described in the body of the report, I also investigated the usage of derived features generated by PCA and a neural network.  
+
+## PCA
+
+I also investigated using derived features generated by PCA.  However, based on the scree plot, the first 17 principal components are needed to explain 80% of the variance (a common "rule of thumb" for percent of variance needed to be explained), so PCA does not enable mapping to a much lower dimensional space, especially compared to the Lasso regression.  As the plots of the first 2 and 3 principle components show, the classes are not clearly separable with the first 3 PCs.  
+
+```{r pca}
+df_combo_pca <- df_combo
+df_combo_pca[, idx_cont] <- scale(df_combo_pca[, idx_cont])
+form1 <- as.formula(paste("~", paste(colnames(df_combo_pca)[idx_cont], 
+                                     collapse = " + "), sep = " "))
+pca1 <- prcomp(form1, data = df_combo_pca)
+
+pr_var <- pca1$sdev^2
+prop_varex <- pr_var / sum(pr_var)
+plot(prop_varex,
+     xlab = "Principal Component", 
+     ylab = "Proportion of Variance Explained", 
+     type = "b")
+#biplot(prcomp(form1, data = df_combo, scale = TRUE))
+#sum(prop_varex[1:17])
+
+df_pca <- data.frame(pc1 = pca1$x[, 1],
+                     pc2 = pca1$x[, 2],
+                     pc3 = pca1$x[, 3])
+df_pca$event <- df_combo$event
+
+ggplot(df_pca, aes(x = pc1, y = pc2, col = event)) +
+  geom_point()
+
+fig1 <- plot_ly(x = df_pca$pc1, y = df_pca$pc2, z = df_pca$pc3,
+                type = "scatter3d", mode="markers", color = df_pca$event,
+                colors = c('blue','red'))
+
+fig1 <- fig1 %>% layout(
+  title = "PCA",
+  scene = list(
+    xaxis = list(title = "PC1"),
+    yaxis = list(title = "PC2"),
+    zaxis = list(title = "PC3")))
+
+fig1
+```
+
+## Neural network
+
+I also considered using a neural network to enhance performance.  However, it did not appear that the neural network meaningfully improved performance and did not allow for inference, given that it is a true black box model.  
+
+I used the AdaBoost model to select the top 20 most important features to include in the neural net model as neural network performance declines if many extraneous features are included.   
+
+```{r nn}
+## convert categorical variables to hot-one encoding
+df_combo_rev <- df_combo[, -dim(df_combo)[2]]
+df_combo_rev[ , idx_check] <- apply(df_combo_rev[ , idx_check], 2, 
+                                    function(x) ifelse(x == "Checked", 1, 0))
+df_combo_rev[ , idx_yn] <- apply(df_combo_rev[ , idx_yn], 2, 
+                                 function(x) ifelse(x == "Yes", 1, 0))
+df_combo_rev$sex <- ifelse(df_combo_rev$sex == "Male", 1, 0)
+df_combo_rev <- df_combo_rev %>%
+  select(-mrn)
+df_combo_rev$duration_symptoms <- as.numeric(df_combo_rev$duration_symptoms)
+df_combo_rev$event <- as.factor(df_combo_rev$event)
+idx_top <- c(match(df_feat_imp_tree$Features[order(df_feat_imp_tree$`Importance, AdaBoost`, 
+                                              decreasing = TRUE)],
+                   colnames(df_combo_rev))[1:20], match("event", colnames(df_combo_rev)))
+df_combo_rev <- df_combo_rev[, idx_top]
+df_combo_rev[, -dim(df_combo_rev)[2]] <- scale(df_combo_rev[, -dim(df_combo_rev)[2]])
+#df_combo_rev <- cbind(df_combo_rev, scale(df_pca[, 1:3]))
+#str(df_combo_rev)
+
+set.seed(seed)
+sample_rev <- sample.split(df_combo_rev, SplitRatio = 0.75)
+train_rev <- subset(df_combo_rev, sample_rev == TRUE) 
+test_rev <- subset(df_combo_rev, sample_rev == FALSE) 
+
+## rather than performing true CV will split training data
+## further into training and testing data to get generalization error
+set.seed(seed)
+sample_rev_net <- sample.split(df_combo_rev, SplitRatio = 0.80)
+train_rev_net <- subset(df_combo_rev, sample_rev_net == TRUE) 
+test_rev_net <- subset(df_combo_rev, sample_rev_net == FALSE) 
+
+## increased threshold to 0.1 and stepmax to 10^6
+acc_mx <- matrix(nrow = 5, ncol = 5)
+for (n in 1:5){
+  for (m in 1:5){
+    set.seed(seed)
+    net <- neuralnet((event == 1) ~ . - event, data = train_rev_net,
+                     hidden = c(m, n), 
+                     act.fct = "tanh",
+                     threshold = 0.1,
+                     linear.output = TRUE,
+                     stepmax = 1e+06)
+    pred <- predict(net, test_rev_net, type = "response")
+    pred <- ifelse(pred > 0.5, 1, 0)
+    acc <- 1 - mean(pred != test_rev_net$event)
+    #print(acc)
+    acc_mx[m, n] <- acc
+  }
+}
+
+rownames(acc_mx) <- 1:5
+colnames(acc_mx) <- 1:5
+
+knitr::kable(as.data.frame(acc_mx)) %>%
+  kable_styling(position = "center", full_width = FALSE)
+
+## set upper triangular to zero so that size of layer 1
+## is greater than or equal to size of layer 2
+acc_mx[upper.tri(acc_mx)] <- 0
+m <- which(acc_mx == max(acc_mx), arr.ind = TRUE)[1]
+n <- which(acc_mx == max(acc_mx), arr.ind = TRUE)[2]
+
+set.seed(seed)
+net1 <- neuralnet((event == 1) ~ . - event, data = train_rev_net,
+                  hidden = c(m, n), 
+                  act.fct = "tanh",
+                  threshold = 0.01,
+                  linear.output = TRUE,
+                  stepmax = 1e+06)
+#plot(net1, rep = "best")
+
+## test accuracy
+pred.test.net1 <- predict(net1, test_rev, type = "response")
+pred.test.net1 <- ifelse(pred.test.net1 > 0.5, 1, 0)
+acc.test.net1 <- 1 - mean(pred.test.net1 != test_rev$event)
+
+## training accuracy
+pred.train.net1 <- predict(net1, train_rev)
+pred.train.net1 <- ifelse(pred.train.net1 > 0.5, 1, 0)
+acc.train.net1 <- 1 - mean(pred.train.net1 != train_rev$event)
+
+## train ROC curve
+prob.train.net1 <- predict(net1, train_rev)
+roc.train.net1 <- roc(train_rev$event, as.numeric(prob.train.net1))
+
+## test ROC curve
+prob.test.net1 <- predict(net1, test_rev)
+roc.test.net1 <- roc(test_rev$event, as.numeric(prob.test.net1))
+
+par(pty = "s")
+par(mfrow = c(1, 2))
+
+plot(roc.train.net1, 
+     plot = TRUE,
+     legacy.axes = TRUE,
+     main = "ROC Curve, Training Data",
+     xlab = "False positive percentage",
+     ylab = "True positive percentage", 
+     col = "blue", 
+     print.auc = TRUE,
+     print.auc.y = 0.75)
+plot(roc.test.net1, 
+     plot = TRUE,
+     legacy.axes = TRUE,
+     main = "ROC Curve, Test Data",
+     xlab = "False positive percentage",
+     ylab = "True positive percentage", 
+     col = "blue", 
+     print.auc = TRUE,
+     print.auc.y = 0.75)
+
+par(mfrow = c(1, 1))
+```
